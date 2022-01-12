@@ -47,10 +47,8 @@ builder.Services.AddOidcAuthentication(options =>
 @page "/authentication/{action}"
 @using Microsoft.AspNetCore.Components.WebAssembly.Authentication
 <RemoteAuthenticatorView Action="@Action">
-    <LoggingIn> //customize as needed
-        <div class="nmsi-center-screen">            
-            <h1>Logging in...</h1> 
-        </div>
+    <LoggingIn> //customize as needed           
+        <h1>Logging in...</h1> 
     </LoggingIn>
 </RemoteAuthenticatorView>
 
