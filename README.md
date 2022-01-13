@@ -211,8 +211,6 @@ _host.cshtml
 
 App.razor
 ```csharp
-@inject OnDemandCoursework.Server.Services.TokenProvider TokenProvider
-
 @code {
     [Parameter]
     public InitialApplicationState InitialState { get; set; }
