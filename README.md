@@ -1,9 +1,9 @@
 # Introduction 
 This is an Identity Provider using OIDC
 
-# Adding and securing a new Blazor client
+# Adding and securing a new Blazor WASM client
 
-## 1. Update `Config.Clients` 
+## 1. Update `Config.Clients` in IdentityProvider
 
 
 ### Add a new `Client` and populate it with necessary credentials.
@@ -101,9 +101,263 @@ This component handles routing and provides a means for globally defining a 'not
 </CascadingAuthenticationState>
 ```
 
+# Adding and securing a new Blazor Server client
+
+## 1. Update `Config.Clients` in IdentityProvider
+
+### Add a new `Client` and populate it with necessary credentials.
+
+Property | Comment
+--:                     | ---
+ClientId                | Any string representative of the client (alphanumeric only, no spaces).
+ClientName              | Any string representative of the client.
+ClientSecret            | A guid with sha256 encoding. (``` ClientSecrets = { new Secret("11111111-1111-1111-1111-111111111111".Sha256()) }, ```)
+AllowedGrantTypes       | default to `GranTypes.Code`.
+RequirePkce             | default to `true`.
+RedirectUris            | Array of acceptable uris that handles the authentication login callback.  `{client uri}/signin-oidc` is a typical ASP.NET callback.
+PostLogoutRedirectUris  | Array of acceptable uris that handles the authentication logout callback.  `{client uri}/signout-oidc` is a typical ASP.NET callback.
+AllowedScopes           | Scopes available from this identity provider.
+AllowedCorsOrigins      | Array of acceptable uris that handles the authentication logout callback.  `{client uri}`.
+RequireConsent          | default to `false` unless the client should request user permission to view items within the allowed scopes.
+
+## 2. Create a service to deliver tokens to hosted client
+```csharp
+public class TokenProvider
+{
+    public string XsrfToken { get; set; } = null!;
+    public string AccessToken { get; set; } = null!;
+}
+
+public class InitialApplicationState
+{
+    public string XsrfToken { get; set; } = null!;
+    public string AccessToken { get; set; } = null!;
+}
+```
+
+## 3. Add OIDC authentication to `Program.cs`
+
+```csharp
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+
+builder.Services.AddScoped<TokenProvider>();
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+builder.Services.AddRazorPages();
+builder.Services.AddServerSideBlazor();
+builder.Services.AddScoped<TokenProvider>();
+
+...
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
+})
+    .AddCookie(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme,
+        options =>
+        {
+            builder.Configuration.Bind("OidcConfiguration", options);
+            options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+            options.Scope.Add("email"); //optional
+            options.Scope.Add("{apiScope}");
+            options.TokenValidationParameters.NameClaimType = "name";
+        });
+
+...
+
+app.UseRouting();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+app.MapBlazorHub();
+app.MapFallbackToPage("/_Host");
+
+app.Run();
+
+```
+
+## 4. Deliver InitialStateToken values from host to app
+
+_host.cshtml
+```csharp
+@page "/"
+@namespace {Assembly}.Pages
+
+@using Microsoft.AspNetCore.Authentication
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+@{
+    Layout = "_Layout";
+}
+@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Xsrf
+
+@{
+    var initialTokenState = new InitialApplicationState()
+        {
+            XsrfToken = Xsrf.GetAndStoreTokens(HttpContext).RequestToken,
+            AccessToken = await HttpContext.GetTokenAsync("access_token")
+        };
+}}
+
+<component type="typeof(App)" render-mode="ServerPrerendered"
+            param-InitialState="initialTokenState" />
+```
+
+App.razor
+```csharp
+@inject OnDemandCoursework.Server.Services.TokenProvider TokenProvider
+
+@code {
+    [Parameter]
+    public InitialApplicationState InitialState { get; set; }
+
+    protected override Task OnInitializedAsync()
+    {
+        TokenProvider.XsrfToken = InitialState.XsrfToken;
+        TokenProvider.AccessToken = InitialState.AccessToken;
+
+        return base.OnInitializedAsync();
+    }
+}
+
+// wrap with CascadingAuthenticationState and replace RouteView with AuthorizeRouteView
+<CascadingAuthenticationState>
+    <BlazyToast CascadeValue="true">
+        <Router AppAssembly="@typeof(App).Assembly">
+            <Found Context="routeData">                 
+                    <AuthorizeRouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)">
+              
+                        <NotAuthorized>
+                            @if (context.User.Identity?.IsAuthenticated != true)
+                            {
+                                <RedirectToLogin />
+                            }
+                            else
+                            {
+                                <p role="alert">You are not authorized to access this resource.</p>
+                            }
+                        </NotAuthorized>
+                        <Authorizing>
+                            <div class="d-grid justify-content-center my-5">
+                                Loading...
+                            </div>
+                        </Authorizing>
+                    </AuthorizeRouteView>
+                <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+            </Found>
+            <NotFound>
+                <PageTitle>Not found</PageTitle>
+                <LayoutView Layout="@typeof(MainLayout)">
+                    <p role="alert">Sorry, there's nothing at this address.</p>
+                </LayoutView>
+            </NotFound>
+        </Router>
+    </BlazyToast>
+</CascadingAuthenticationState>
+```
+
+## 5. Create RedirectToLogin component - note that the path should match the Login.cshtml route
+```csharp
+@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        Navigation.NavigateTo($"login?returnUrl={Uri.EscapeDataString(Navigation.Uri)}");
+    }
+}
+```
+
+## 6. Create Login.cshtml and Logout.cshtml pages
+
+The .cshtml page handles the routing while the .cshtml.cs file handles the logic.  The .cshtml pages require no change.
+
+Login.cshtml.cs
+```csharp
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+
+namespace {Assembly}.Pages
+{
+    public class LoginModel : PageModel
+    {
+        public async Task OnGetAsync(string redirectUri)
+        {
+            if (string.IsNullOrEmpty(redirectUri))            
+                redirectUri = Url.Content("~/");            
+
+            if(HttpContext.User.Identity?.IsAuthenticated ?? false)
+                Response.Redirect(redirectUri);
+
+            await HttpContext.ChallengeAsync(
+                OpenIdConnectDefaults.AuthenticationScheme,
+                new AuthenticationProperties { RedirectUri = redirectUri });
+        }
+    }
+}
+```
+
+Logout.cshtml.cs
+```csharp
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+
+namespace {Assembly}.Pages
+{
+    public class LogoutModel : PageModel
+    {
+        public async Task OnPostAsync()
+        {
+            await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            await HttpContext.SignOutAsync(OpenIdConnectDefaults.AuthenticationScheme);
+        }
+    }
+}
+```
+
+## Logging in and out within a Razor component
+To login, simply link to the "login" page
+```html
+<a href="login">Log in</a>
+```
+
+To logout, you must protect against cross site request forgery and as such must use a post request
+```html
+@inject TokenProvider TokenProvider
+
+<form action="/logout" method="post">
+    <button type="submit">Logout</button>
+    <input name="__RequestVerificationToken" type="hidden"
+        value="@TokenProvider.XsrfToken" />
+</form>
+```
+
+## Talking to a secured API
+- Add the nuget page `IdentityModel`
+- Add bearer token to the api call
+
+```csharp
+using IdentityModel.Client;
+
+public async Task<string> GetAStringAsync(CancellationToken ct = default)
+{
+    _client.SetBearerToken(tokenProvider.AccessToken); // this line should appear before an api call.
+    return await BaseGetAsync<string>("apiEndPoint", ct);
+}
+```
+
 # Adding and securing a new API
 
-## 1. Update `Config.Clients`
+## 1. Update `Config.Clients` in IdentityProvider
 
 ### Add the API to ApiResources, ApiScopes, and to the list of AllowedScopes for any client that will need access to the API.
 
